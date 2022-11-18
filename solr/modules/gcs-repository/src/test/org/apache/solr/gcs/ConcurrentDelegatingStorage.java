@@ -65,6 +65,15 @@ public class ConcurrentDelegatingStorage implements Storage {
   }
 
   @Override
+  public void close() {
+    try {
+      synchronized (this) {
+        delegate.close();
+      }
+    } catch (Exception e) {}
+  }
+
+  @Override
   public synchronized Bucket create(BucketInfo bucketInfo, BucketTargetOption... options) {
     return delegate.create(bucketInfo, options);
   }
