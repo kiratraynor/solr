@@ -21,8 +21,11 @@ import java.util.Arrays;
 import java.util.Collection;
 import java.util.Collections;
 import java.util.List;
+
+import org.apache.lucene.index.LeafReader;
 import org.apache.lucene.index.LeafReaderContext;
 import org.apache.lucene.index.ReaderUtil;
+import org.apache.lucene.search.DocIdSet;
 import org.apache.lucene.search.DocIdSetIterator;
 import org.apache.lucene.util.Accountable;
 import org.apache.lucene.util.Bits;
@@ -758,6 +761,160 @@ public class SortedIntDocSet extends DocSet {
   @Override
   public DocSetQuery makeQuery() {
     return new DocSetQuery(this);
+  }
+
+  public static int findIndex(int[] arr, int value, int low, int high) {
+    // binary search
+    while (low <= high) {
+      int mid = (low+high) >>> 1;
+      int found = arr[mid];
+
+      if (found < value) {
+        low = mid+1;
+      }
+      else if (found > value) {
+        high = mid-1;
+      }
+      else {
+        return mid;
+      }
+    }
+    return low;
+  }
+
+  @Override
+  public Filter getTopFilter() {
+    return new Filter() {
+      int lastEndIdx = 0;
+
+      @Override
+      public DocIdSet getDocIdSet(final LeafReaderContext context, final Bits acceptDocs) {
+        LeafReader reader = context.reader();
+        // all Solr DocSets that are used as filters only include live docs
+        final Bits acceptDocs2 = acceptDocs == null ? null : (reader.getLiveDocs() == acceptDocs ? null : acceptDocs);
+
+        final int base = context.docBase;
+        final int maxDoc = reader.maxDoc();
+        final int max = base + maxDoc;   // one past the max doc in this segment.
+        int sidx = Math.max(0,lastEndIdx);
+
+        if (sidx > 0 && docs[sidx-1] >= base) {
+          // oops, the lastEndIdx isn't correct... we must have been used
+          // in a multi-threaded context, or the indexreaders are being
+          // used out-of-order.  start at 0.
+          sidx = 0;
+        }
+        if (sidx < docs.length && docs[sidx] < base) {
+          // if docs[sidx] is < base, we need to seek to find the real start.
+          sidx = findIndex(docs, base, sidx, docs.length-1);
+        }
+
+        final int startIdx = sidx;
+
+        // Largest possible end index is limited to the start index
+        // plus the number of docs contained in the segment.  Subtract 1 since
+        // the end index is inclusive.
+        int eidx = Math.min(docs.length, startIdx + maxDoc) - 1;
+
+        // find the real end
+        eidx = findIndex(docs, max, startIdx, eidx) - 1;
+
+        final int endIdx = eidx;
+        lastEndIdx = endIdx;
+
+
+        return BitsFilteredDocIdSet.wrap(new DocIdSet() {
+          @Override
+          public DocIdSetIterator iterator() {
+            return new DocIdSetIterator() {
+              int idx = startIdx;
+              int adjustedDoc = -1;
+
+              @Override
+              public int docID() {
+                return adjustedDoc;
+              }
+
+              @Override
+              public int nextDoc() {
+                return adjustedDoc = (idx > endIdx) ? NO_MORE_DOCS : (docs[idx++] - base);
+              }
+
+              @Override
+              public int advance(int target) {
+                if (idx > endIdx || target==NO_MORE_DOCS) return adjustedDoc=NO_MORE_DOCS;
+                target += base;
+
+                // probe next
+                int rawDoc = docs[idx++];
+                if (rawDoc >= target) return adjustedDoc=rawDoc-base;
+
+                int high = endIdx;
+
+                // TODO: probe more before resorting to binary search?
+
+                // binary search
+                while (idx <= high) {
+                  int mid = (idx+high) >>> 1;
+                  rawDoc = docs[mid];
+
+                  if (rawDoc < target) {
+                    idx = mid+1;
+                  }
+                  else if (rawDoc > target) {
+                    high = mid-1;
+                  }
+                  else {
+                    idx=mid+1;
+                    return adjustedDoc=rawDoc - base;
+                  }
+                }
+
+                // low is on the insertion point...
+                if (idx <= endIdx) {
+                  return adjustedDoc = docs[idx++] - base;
+                } else {
+                  return adjustedDoc=NO_MORE_DOCS;
+                }
+              }
+
+              @Override
+              public long cost() {
+                return docs.length;
+              }
+            };
+          }
+
+          @Override
+          public long ramBytesUsed() {
+            return RamUsageEstimator.sizeOf(docs);
+          }
+
+          @Override
+          public Bits bits() {
+            // random access is expensive for this set
+            return null;
+          }
+
+        }, acceptDocs2);
+      }
+      @Override
+      public String toString(String field) {
+        return "SortedIntDocSetTopFilter";
+      }
+
+      // Equivalence should/could be based on docs here? How did it work previously?
+
+      @Override
+      public boolean equals(Object other) {
+        return other == this;
+      }
+
+      @Override
+      public int hashCode() {
+        return System.identityHashCode(this);
+      }
+    };
   }
 
   @Override

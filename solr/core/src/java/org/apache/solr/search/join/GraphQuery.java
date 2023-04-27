@@ -45,6 +45,7 @@ import org.apache.lucene.util.automaton.DaciukMihovAutomatonBuilder;
 import org.apache.solr.schema.SchemaField;
 import org.apache.solr.search.BitDocSet;
 import org.apache.solr.search.DocSet;
+import org.apache.solr.search.Filter;
 import org.apache.solr.search.SolrIndexSearcher;
 
 /**
@@ -138,6 +139,7 @@ public class GraphQuery extends Query {
     final SolrIndexSearcher fromSearcher;
     private int currentDepth = -1;
     private DocSet resultSet;
+    private Filter filter;
     SchemaField collectSchemaField; // the field to collect values from
     SchemaField matchSchemaField; // the field to match those values
 
@@ -274,13 +276,14 @@ public class GraphQuery extends Query {
 
     @Override
     public Scorer scorer(LeafReaderContext context) throws IOException {
-      if (resultSet == null) {
-        resultSet = getDocSet();
+      if (this.filter == null) {
+        this.resultSet = this.getDocSet();
+        this.filter = this.resultSet.getTopFilter();
       }
-      DocIdSetIterator disi = resultSet.iterator(context);
-      // create a scrorer on the result set, if results from right query are empty, use empty
-      // iterator.
-      return new GraphScorer(this, disi == null ? DocIdSetIterator.empty() : disi, 1);
+
+      DocIdSet readerSet = filter.getDocIdSet(context,context.reader().getLiveDocs());
+      return new GraphQuery.GraphScorer(this,
+              readerSet == null ? DocIdSetIterator.empty() : readerSet.iterator(), 1);
     }
 
     @Override

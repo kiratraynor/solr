@@ -124,6 +124,13 @@ public abstract class DocSet implements Accountable, Cloneable /* extends Collec
   public abstract Query makeQuery();
 
   /**
+   * Returns a Filter for use in Lucene search methods, assuming this DocSet
+   * was generated from the top-level MultiReader that the Lucene search
+   * methods will be invoked with.
+   */
+  public abstract Filter getTopFilter();
+
+  /**
    * Adds all the docs from this set to the target. The target should be sized large enough to
    * accommodate all of the documents before calling this method.
    */

@@ -18,10 +18,16 @@ package org.apache.solr.search;
 
 import java.util.Collection;
 import java.util.Collections;
+import java.util.Objects;
+
+import org.apache.lucene.index.LeafReader;
 import org.apache.lucene.index.LeafReaderContext;
+import org.apache.lucene.search.DocIdSet;
 import org.apache.lucene.search.DocIdSetIterator;
 import org.apache.lucene.util.Accountable;
+import org.apache.lucene.util.BitDocIdSet;
 import org.apache.lucene.util.BitSetIterator;
+import org.apache.lucene.util.Bits;
 import org.apache.lucene.util.FixedBitSet;
 import org.apache.lucene.util.RamUsageEstimator;
 
@@ -323,6 +329,118 @@ public class BitDocSet extends DocSet {
   @Override
   public DocSetQuery makeQuery() {
     return new DocSetQuery(this);
+  }
+
+  @Override
+  public Filter getTopFilter() {
+    // TODO: if cardinality isn't cached, do a quick measure of sparseness
+    // and return null from bits() if too sparse.
+
+    return new Filter() {
+
+      final FixedBitSet bs = getBits();
+
+      @Override
+      public DocIdSet getDocIdSet(LeafReaderContext context, final Bits acceptDocs) {
+        LeafReader reader = context.reader();
+        // all Solr DocSets that are used as filters only include live docs
+        final Bits acceptDocs2 = acceptDocs == null ? null : (reader.getLiveDocs() == acceptDocs ? null : acceptDocs);
+
+        if (context.isTopLevel) {
+          return BitsFilteredDocIdSet.wrap(new BitDocIdSet(bs), acceptDocs);
+        }
+
+        final int base = context.docBase;
+        final int max = base + reader.maxDoc();   // one past the max doc in this segment.
+
+        return BitsFilteredDocIdSet.wrap(new DocIdSet() {
+          @Override
+          public DocIdSetIterator iterator() {
+            return new DocIdSetIterator() {
+              int pos = base - 1;
+              int adjustedDoc = -1;
+
+              @Override
+              public int docID() {
+                return adjustedDoc;
+              }
+
+              @Override
+              public int nextDoc() {
+                int next = pos+1;
+                if (next >= max) {
+                  return adjustedDoc = NO_MORE_DOCS;
+                } else {
+                  pos = bs.nextSetBit(next);
+                  return adjustedDoc = pos < max ? pos - base : NO_MORE_DOCS;
+                }
+              }
+
+              @Override
+              public int advance(int target) {
+                if (target == NO_MORE_DOCS) return adjustedDoc = NO_MORE_DOCS;
+                int adjusted = target + base;
+                if (adjusted >= max) {
+                  return adjustedDoc = NO_MORE_DOCS;
+                } else {
+                  pos = bs.nextSetBit(adjusted);
+                  return adjustedDoc = pos < max ? pos - base : NO_MORE_DOCS;
+                }
+              }
+
+              @Override
+              public long cost() {
+                // we don't want to actually compute cardinality, but
+                // if it's already been computed, we use it (pro-rated for the segment)
+                int maxDoc = max-base;
+                if (size() != -1) {
+                  return (long)(size() * ((FixedBitSet.bits2words(maxDoc)<<6) / (float)bs.length()));
+                } else {
+                  return maxDoc;
+                }
+              }
+            };
+          }
+
+          @Override
+          public long ramBytesUsed() {
+            return bs.ramBytesUsed();
+          }
+
+          @Override
+          public Bits bits() {
+            return new Bits() {
+              @Override
+              public boolean get(int index) {
+                return bs.get(index + base);
+              }
+
+              @Override
+              public int length() {
+                return max-base;
+              }
+            };
+          }
+
+        }, acceptDocs2);
+      }
+
+      @Override
+      public String toString(String field) {
+        return "BitSetDocTopFilter";
+      }
+
+      @Override
+      public boolean equals(Object other) {
+        return sameClassAs(other) &&
+                Objects.equals(bs, getClass().cast(other).bs);
+      }
+
+      @Override
+      public int hashCode() {
+        return classHash() * 31 + bs.hashCode();
+      }
+    };
   }
 
   @Override
